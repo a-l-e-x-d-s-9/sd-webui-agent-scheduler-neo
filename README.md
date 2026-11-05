@@ -56,6 +56,11 @@ Start a generation normally. Edit the next prompt and settings, then click
 and previews appear automatically on the matching main tab, including when you
 open the page while a queued job is already running.
 
+The status watcher can also use the preceding version's API while a long-running
+Forge process is still active. Updating frontend files in place does not require
+stopping that batch; refresh the browser to load them. Python changes take effect
+at the next normal Forge restart.
+
 Completed images append to the current main gallery while the page is open. A
 fresh page watches new completions; older results remain in Agent Scheduler's
 history. Global queue counts appear beside both Enqueue buttons.

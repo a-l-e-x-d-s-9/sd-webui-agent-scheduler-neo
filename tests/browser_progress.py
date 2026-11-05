@@ -12,13 +12,22 @@ def main():
     parser.add_argument("--base-url", default="http://127.0.0.1:17866")
     parser.add_argument("--browser", default=shutil.which("google-chrome"))
     parser.add_argument("--output", default="/tmp/forge-progress-validation.json")
+    parser.add_argument("--legacy-api", action="store_true")
     args = parser.parse_args()
     base = args.base_url.rstrip("/")
     report = {"browser_errors": []}
     with sync_playwright() as p:
         browser = p.chromium.launch(executable_path=args.browser, headless=True,
                                     args=["--no-sandbox"])
-        page = browser.new_page()
+        context = browser.new_context()
+        if args.legacy_api:
+            def legacy_feed(route):
+                response = route.fetch()
+                data = response.json()
+                data.pop("queue", None)
+                route.fulfill(response=response, json=data)
+            context.route("**/agent-scheduler/v1/gallery-updates*", legacy_feed)
+        page = context.new_page()
         page.on("pageerror", lambda e: report["browser_errors"].append(str(e)))
         page.goto(base, wait_until="domcontentloaded")
         page.wait_for_selector("#agent_scheduler_txt2img_queue_count")
@@ -77,7 +86,7 @@ def main():
 
         # A fresh main-tab page must attach to a running queue without opening
         # Agent Scheduler. The original page keeps its combined gallery.
-        second = browser.new_page()
+        second = context.new_page()
         second.on("pageerror", lambda e: report["browser_errors"].append(str(e)))
         second.goto(base, wait_until="domcontentloaded")
         second.wait_for_function("document.querySelector('#agent_scheduler_txt2img_queue_count')?.dataset.state === 'generating'")
@@ -105,7 +114,7 @@ def main():
         assert not report["browser_errors"], report["browser_errors"]
         assert page.get_by_role("tab", name="txt2img", exact=True).get_attribute("aria-selected") == "true"
         report.update(main_tab_only="passed", transitions="passed", gallery_images=3,
-                      idle_status=badge.inner_text())
+                      idle_status=badge.inner_text(), legacy_api=args.legacy_api)
         page.screenshot(path="/tmp/forge-progress-success.png")
         browser.close()
     Path(args.output).write_text(json.dumps(report, indent=2))
