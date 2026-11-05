@@ -1,7 +1,7 @@
 import json
 import base64
 from enum import Enum
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from typing import Optional, Union, List, Dict
 try:
     from pydantic import ConfigDict, BaseModel, Field
@@ -161,6 +161,41 @@ class TaskTable(Base):
 
 
 class TaskManager(BaseTableManager):
+    def get_queue_snapshot(self, current_task_id, paused=False):
+        with Session(self.engine) as session:
+            pending = session.query(func.count(TaskTable.id)).filter(
+                TaskTable.status == TaskStatus.PENDING
+            ).scalar()
+            active = session.query(TaskTable.type, TaskTable.status).filter(
+                TaskTable.id == current_task_id
+            ).first() if current_task_id is not None else None
+            # Running scheduler jobs remain pending in storage until completion.
+            # Count only the jobs waiting behind them in the queue badge.
+            if active is not None and active.status == TaskStatus.PENDING:
+                pending -= 1
+            return {"current_task_id": current_task_id,
+                    "current_task_type": active.type if active is not None else None,
+                    "pending_tasks": max(0, pending), "paused": bool(paused)}
+
+    def get_gallery_updates(self, since: datetime):
+        # Poll only small completion records, without loading images or script BLOBs.
+        with Session(self.engine) as session:
+            rows = (
+                session.query(TaskTable.id, TaskTable.type, TaskTable.updated_at, TaskTable.priority)
+                .filter(TaskTable.status == TaskStatus.DONE)
+                # SQLite defaults omit fractional seconds, whereas SQLAlchemy
+                # binds .000000. Overlap one second so same-second commits cannot
+                # fall between cursor polls due to their textual representation.
+                .filter(TaskTable.updated_at >= since - timedelta(seconds=1))
+                .order_by(TaskTable.updated_at, TaskTable.priority, TaskTable.id)
+                .all()
+            )
+            return [
+                {"id": row.id, "type": row.type,
+                 "version": f"{row.id}:{row.updated_at.isoformat()}:{row.priority}"}
+                for row in rows
+            ]
+
     def get_task(self, id: str) -> Union[TaskTable, None]:
         session = Session(self.engine)
         try:

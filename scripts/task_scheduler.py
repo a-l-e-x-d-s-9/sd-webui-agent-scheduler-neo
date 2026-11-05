@@ -25,6 +25,7 @@ from agent_scheduler.task_runner import TaskRunner, get_instance
 from agent_scheduler.helpers import get_default_config_dependencies, log, compare_components_with_ids, get_components_by_ids, is_macos
 from agent_scheduler.db import init as init_db, task_manager, TaskStatus
 from agent_scheduler.api import regsiter_apis
+from agent_scheduler.gallery import merge_gallery_results
 
 is_sdnext = parser.description == "SD.Next"
 ToolButton = gr.Button if is_sdnext else ui_components.ToolButton
@@ -77,6 +78,8 @@ class Script(scripts.Script):
         self.enqueue_row = None
         self.checkpoint_dropdown = None
         self.submit_button = None
+        self.gallery_updates = None
+        self.gallery_output_count = 4
 
     def title(self):
         return "Agent Scheduler"
@@ -140,6 +143,9 @@ class Script(scripts.Script):
                     f"refresh_{id_part}_checkpoint",
                 )
             self.submit_button = gr.Button("Enqueue", elem_id=f"{id_part}_enqueue", variant="primary")
+            self.gallery_updates = gr.Textbox(
+                value="[]", visible=False, elem_id=f"agent_scheduler_{id_part}_gallery_updates"
+            )
 
     def bind_enqueue_button(self, root: gr.Blocks):
         generate = self.generate_button
@@ -175,11 +181,11 @@ class Script(scripts.Script):
             log.error("[AgentScheduler] No dependency found, cannot bind Enqueue button.")
             return
 
-        # fn_block.inputs auf self speichern damit wrap_register_ui_task sie nutzen kann
         if "_fn" in dependency:
             fn_block = dependency["_fn"]
         else:
-            fn_block = next(fn for fn in root.fns.values() if compare_components_with_ids(fn.inputs, dependency["inputs"]))
+            functions = root.fns.values() if isinstance(root.fns, dict) else root.fns
+            fn_block = next(fn for fn in functions if compare_components_with_ids(fn.inputs, dependency["inputs"]))
 
         fn_inputs = list(fn_block.inputs)
         new_inputs = [self.checkpoint_dropdown] + fn_inputs
@@ -189,15 +195,75 @@ class Script(scripts.Script):
             if self.checkpoint_dropdown is not None:
                 self.checkpoint_dropdown.change(fn=self.on_checkpoint_changed, inputs=[self.checkpoint_dropdown])
 
-            fn = self.wrap_register_ui_task()
+            # Generate also updates extension states (ADetailer, ControlNet, etc.).
+            # Chain their producers before taking the snapshot so queued tasks use
+            # the settings at Enqueue time, even before the first generation.
+            event = None
+            state_inputs = {c._id for c in fn_inputs if isinstance(c, gr.State)}
+            for producer in dependencies:
+                if producer is dependency or not state_inputs.intersection(producer["outputs"]):
+                    continue
+                producer_fn = producer.get("_fn")
+                if producer_fn is None:
+                    functions = root.fns.values() if isinstance(root.fns, dict) else root.fns
+                    producer_fn = next(
+                        f for f in functions if compare_components_with_ids(f.inputs, producer["inputs"])
+                    )
+                bind = self.submit_button.click if event is None else event.then
+                event = bind(
+                    fn=producer_fn.fn,
+                    inputs=list(producer_fn.inputs),
+                    outputs=list(producer_fn.outputs),
+                    queue=False,
+                    show_progress=False,
+                )
+
+            bind = self.submit_button.click if event is None else event.then
             _js_fn = "(...args) => submit_enqueue_img2img(...args)" if is_img2img else "(...args) => submit_enqueue(...args)"
-            self.submit_button.click(
-                fn=fn,
-                _js=_js_fn,
+            bind(
+                fn=self.wrap_register_ui_task(),
+                js=_js_fn,
                 inputs=new_inputs,
                 outputs=None,
+                queue=False,
                 show_progress=False,
             )
+
+            if self.gallery_updates is not None:
+                output_components = list(fn_block.outputs)
+                self.gallery_output_count = len(output_components)
+                generation_info_index = 2 if len(output_components) == 5 else 1
+                self.gallery_updates.change(
+                    fn=self.sync_main_gallery,
+                    inputs=[self.gallery_updates, output_components[0],
+                            output_components[generation_info_index]],
+                    outputs=output_components,
+                    queue=False,
+                    trigger_mode="always_last",
+                    show_progress=False,
+                )
+
+    def sync_main_gallery(self, updates, gallery, generation_info):
+        info = json.loads(generation_info or "{}")
+        seen = set(info.get("agent_scheduler_gallery_versions", []))
+        completed = []
+        for update in json.loads(updates or "[]"):
+            if update["version"] in seen:
+                continue
+            task = task_manager.get_task(update["id"])
+            mode = "img2img" if self.is_img2img else "txt2img"
+            if task is not None and task.type == mode and task.status == TaskStatus.DONE:
+                completed.append((update["version"], json.loads(task.result)))
+        merged = merge_gallery_results(gallery, info, completed)
+        if merged is None:
+            return tuple(gr.skip() for _ in range(self.gallery_output_count))
+        images, info, selected = merged
+        from modules.ui_common import plaintext_to_html
+        result = [gr.update(value=images, visible=True, selected_index=selected)]
+        if self.gallery_output_count == 5:
+            result.append(gr.update(value=None, visible=False))
+        result.extend([json.dumps(info), plaintext_to_html(info["infotexts"][selected]), gr.skip()])
+        return tuple(result)
 
 
     
@@ -207,24 +273,14 @@ class Script(scripts.Script):
 
     def wrap_register_ui_task(self):
         def f(request: gr.Request, *args):
-            if len(args) == 0:
-                raise Exception("Invalid call")
+            if len(args) < 2 or not isinstance(args[1], str):
+                raise ValueError("Enqueue requires a checkpoint, task ID and generation inputs")
 
-            # A1111: args[0]=checkpoint, args[1]=task_id, args[2:]=generate_args
-            # Forge Neo: args[0]=task_id, args[1:]=generate_args (kein checkpoint im args[0])
-            # Erkennung: task_id beginnt mit "task(" oder ist ein UUID
-            if len(args) >= 2 and isinstance(args[1], str) and (
-                args[1].startswith("task(") or
-                (len(args[1]) > 8 and "-" in args[1]) or
-                args[1] == queue_with_every_checkpoints
-            ):
-                checkpoint: str = args[0]
-                task_id = args[1]
-                args = args[1:]
-            else:
-                checkpoint: str = self.checkpoint_override
-                task_id = args[0]
-                args = args[1:]
+            # The binding prepends a checkpoint to the complete Generate inputs.
+            # Keep the task ID in that list: the generation function requires it.
+            checkpoint: str = args[0]
+            task_id = args[1]
+            args = args[1:]
             task_name = None
 
             if task_id == queue_with_every_checkpoints:
@@ -258,8 +314,9 @@ class Script(scripts.Script):
                         task_name=task_name,
                         request=request,
                     )
-                except:
-                     log.error("[ArtVenture] Possible taskID conflict. Please try enqueing again")
+                except Exception:
+                    log.exception("[AgentScheduler] Could not enqueue task %s", t_id)
+                    raise
 
             task_runner.execute_pending_tasks_threading()
 

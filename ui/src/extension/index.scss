@@ -3,6 +3,21 @@
 
 /* ========================================================================= */
 
+.agent-scheduler-queue-count {
+  align-self: center;
+  flex: 0 0 auto;
+  padding: 0.25rem 0.5rem;
+  color: var(--body-text-color);
+  font-size: 0.875rem;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.agent-scheduler-queue-count[data-state='generating'] {
+  color: var(--color-accent);
+  font-weight: 600;
+}
+
 .ag-theme-gradio {
   @extend .ag-theme-alpine;
   .dark & {

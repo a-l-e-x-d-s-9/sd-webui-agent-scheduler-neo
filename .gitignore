@@ -37,3 +37,9 @@ notification.mp3
 *.db
 *.sqlite
 *.sqlite3
+
+# Machine-specific repair notes and generated validation artifacts.
+/FORGE_NEO_FIX.md
+/*validation*.json
+/production-verification.json
+/log.txt

@@ -200,6 +200,17 @@ def regsiter_apis(app: App, task_runner: TaskRunner):
             paused=TaskRunner.instance.paused,
         )
 
+    @app.get("/agent-scheduler/v1/gallery-updates", dependencies=deps)
+    def gallery_updates(since: Optional[int] = None):
+        # Inclusive, second-resolution cursor matches SQLite's update timestamps.
+        # The first request establishes a baseline rather than replaying history.
+        cursor = int(datetime.now(timezone.utc).timestamp())
+        tasks = [] if since is None else task_manager.get_gallery_updates(
+            datetime.fromtimestamp(min(since, cursor), timezone.utc)
+        )
+        return {"cursor": cursor, "tasks": tasks,
+                "queue": task_manager.get_queue_snapshot(progress.current_task, task_runner.paused)}
+
     @app.get("/agent-scheduler/v1/export")
     def export_queue(limit: int = 1000, offset: int = 0):
         pending_tasks = task_manager.get_tasks(status=TaskStatus.PENDING, limit=limit, offset=offset)

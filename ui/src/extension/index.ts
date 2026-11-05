@@ -23,11 +23,11 @@ import saveIcon from '../assets/icons/save.svg?raw';
 import searchIcon from '../assets/icons/search.svg?raw';
 import { getHighlightPosition, getPixelOnRow, getRowNodeAtPixel } from '../utils/ag-grid';
 import { debounce } from '../utils/debounce';
-import { extractArgs } from '../utils/extract-args';
 
 import { createHistoryTasksStore } from './stores/history.store';
 import { createPendingTasksStore } from './stores/pending.store';
 import { createSharedStore } from './stores/shared.store';
+import { startMainGallerySync } from './main-gallery';
 import { ProgressResponse, ResponseStatus, Task, TaskStatus } from './types';
 
 import 'ag-grid-community/styles/ag-grid.css';
@@ -295,54 +295,6 @@ async function notify(response: ResponseStatus) {
 window.notify = notify;
 window.origRandomId = window.randomId;
 
-function showTaskProgress(task_id: string, type: string | undefined, callback: () => void) {
-  // delay progress request until the options loaded
-  if (Object.keys(opts).length === 0) {
-    setTimeout(() => showTaskProgress(task_id, type, callback), 500);
-    return;
-  }
-
-  const args = extractArgs(requestProgress);
-
-  const gallery = gradioApp().querySelector<HTMLDivElement>(
-    '#agent_scheduler_current_task_images'
-  )!;
-
-  // A1111 version
-  if (args.includes('progressbarContainer')) {
-    requestProgress(task_id, gallery, gallery, callback);
-  } else {
-    // Vlad version
-    const progressDiv = document.createElement('div');
-    progressDiv.className = 'progressDiv';
-    gallery.parentElement!.insertBefore(progressDiv, gallery);
-    requestProgress(
-      task_id,
-      gallery,
-      gallery,
-      () => {
-        progressDiv.remove();
-        callback();
-      },
-      res => {
-        const perc = `${Math.round(res.progress * 100.0)}%`;
-        const eta = res.paused ? 'Paused' : `ETA: ${Math.round(res.eta)}s`;
-        progressDiv.innerText = `${perc} ${eta}`;
-        progressDiv.style.background = `linear-gradient(to right, var(--primary-500) 0%, var(--primary-800) ${perc}, var(--neutral-700) ${perc})`;
-      }
-    );
-  }
-
-  // monkey patch randomId to return task_id, then call submit to trigger progress
-  window.randomId = () => task_id;
-  if (type === 'txt2img') {
-    submit();
-  } else if (type === 'img2img') {
-    submit_img2img();
-  }
-  window.randomId = window.origRandomId;
-}
-
 function initQueueHandler() {
   const getUiCheckpoint = (is_img2img: boolean) => {
     const enqueue_wrapper_model = gradioApp().querySelector<HTMLInputElement>(
@@ -372,11 +324,7 @@ function initQueueHandler() {
       btnEnqueue.innerText = 'Queued';
       setTimeout(() => {
         btnEnqueue.innerText = 'Enqueue';
-        if (!sharedStore.getState().uiAsTab) {
-          if (sharedStore.getState().selectedTab === 'pending') {
-            pendingStore.refresh();
-          }
-        }
+        window.dispatchEvent(new Event('agent-scheduler-refresh'));
       }, 1000);
     }
 
@@ -395,11 +343,7 @@ function initQueueHandler() {
       btnImg2ImgEnqueue.innerText = 'Queued';
       setTimeout(() => {
         btnImg2ImgEnqueue.innerText = 'Enqueue';
-        if (!sharedStore.getState().uiAsTab) {
-          if (sharedStore.getState().selectedTab === 'pending') {
-            pendingStore.refresh();
-          }
-        }
+        window.dispatchEvent(new Event('agent-scheduler-refresh'));
       }, 1000);
     }
 
@@ -451,14 +395,7 @@ function initQueueHandler() {
     img2imgPrompt.addEventListener('keydown', handleShortcut);
   }
 
-  // watch for current task id change
-  pendingStore.subscribe((curr, prev) => {
-    const id = curr.current_task_id;
-    if (id !== prev.current_task_id && id != null) {
-      const task = curr.pending_tasks.find(t => t.id === id);
-      showTaskProgress(id, task?.type, pendingStore.refresh);
-    }
-  });
+  window.addEventListener('agent-scheduler-refresh', () => { void pendingStore.refresh(); });
 
   // context menu
   const queueWithTaskName = (img2img = false) => {
@@ -1180,14 +1117,20 @@ function initHistoryTab() {
 
 let agentSchedulerInitialized = false;
 onUiLoaded(function initAgentScheduler() {
-  // delay ui init until dom is available
-  if (gradioApp().querySelector('#agent_scheduler_tabs') == null) {
+  // Wait for the queue buttons as well as the tab before installing handlers.
+  // A page reload must not be needed to make the first Enqueue work.
+  if (
+    gradioApp().querySelector('#agent_scheduler_tabs') == null ||
+    gradioApp().querySelector('#txt2img_enqueue') == null ||
+    gradioApp().querySelector('#img2img_enqueue') == null
+  ) {
     setTimeout(initAgentScheduler, 500);
     return;
   }
 
   if (agentSchedulerInitialized) return;
   initQueueHandler();
+  startMainGallerySync();
   initTabChangeHandler();
   initPendingTab();
   initHistoryTab();

@@ -116,7 +116,8 @@ def _extract_target_id(t) -> int:
 def get_default_config_dependencies(root: Block):
     if hasattr(root, 'fns') and root.fns:
         result = []
-        for fn in root.fns.values():
+        functions = root.fns.values() if isinstance(root.fns, dict) else root.fns
+        for fn in functions:
             inputs = list(fn.inputs) if hasattr(fn, 'inputs') and fn.inputs else []
             outputs = list(fn.outputs) if hasattr(fn, 'outputs') and fn.outputs else []
             targets = []
@@ -124,7 +125,8 @@ def get_default_config_dependencies(root: Block):
                 for t in fn.targets:
                     cid = _extract_target_id(t)
                     if cid is not None:
-                        targets.append((cid, 'click'))
+                        event = t[1] if isinstance(t, tuple) and len(t) == 2 else 'click'
+                        targets.append((cid, event))
             dep = {
                 'targets': targets,
                 'inputs': [c._id for c in inputs if hasattr(c, '_id')],
@@ -151,10 +153,12 @@ def detect_control_net(root: gr.Blocks, submit: gr.Button):
     for d in dependencies:
         if len(d["outputs"]) == 1:
             outputs = get_components_by_ids(root, d["outputs"])
+            if not outputs:
+                continue
             output = outputs[0]
             if (
                 isinstance(output, gr.State)
-                and type(output.value).__name__ == "UiControlNetUnit"
+                and type(output.value).__name__ in ("UiControlNetUnit", "ControlNetUnit")
             ):
                 UiControlNetUnit = type(output.value)
 

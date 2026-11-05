@@ -4,7 +4,7 @@
   "version": "0.0.0",
   "scripts": {
     "dev": "vite",
-    "build": "tsc && yarn build:extension",
+    "build": "tsc && npm run build:extension",
     "build:extension": "vite build --config vite.extension.ts",
     "lint": "eslint src --ext ts,tsx --fix --report-unused-disable-directives --max-warnings 0",
     "preview": "vite preview"

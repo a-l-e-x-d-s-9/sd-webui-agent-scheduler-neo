@@ -461,10 +461,12 @@ class TaskRunner:
                 result = func(*args)
                 if result[0] is None and hasattr(shared.state, "oom") and shared.state.oom:
                     res = OutOfMemoryError()
-                elif "CUDA out of memory" in result[2]:
+                elif any("CUDA out of memory" in value for value in result if isinstance(value, str)):
                     res = OutOfMemoryError()
                 else:
-                    res = result[1]
+                    # Neo returns gallery, video, generation_info, info, log;
+                    # A1111 returns gallery, generation_info, info, log.
+                    res = result[2] if len(result) == 5 else result[1]
             except Exception as e:
                 res = e
             finally:

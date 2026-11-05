@@ -24,9 +24,9 @@ from .helpers import log, get_dict_attribute
 
 img2img_image_args_by_mode: Dict[int, List[List[str]]] = {
     0: [["init_img"]],
-    1: [["sketch"]],
-    2: [["init_img_with_mask", "image"], ["init_img_with_mask", "mask"]],
-    3: [["inpaint_color_sketch"], ["inpaint_color_sketch_orig"]],
+    1: [["sketch"], ["sketch_fg"]],
+    2: [["init_img_with_mask", "image"], ["init_img_with_mask", "mask"], ["init_img_with_mask_fg"]],
+    3: [["inpaint_color_sketch"], ["inpaint_color_sketch_orig"], ["inpaint_color_sketch_fg"]],
     4: [["init_img_inpaint"], ["init_mask_inpaint"]],
 }
 
@@ -137,10 +137,12 @@ def deserialize_image(image_str):
 def serialize_img2img_image_args(args: Dict):
     for mode, image_args in img2img_image_args_by_mode.items():
         for keys in image_args:
+            if keys[0] not in args:
+                continue
             if mode != args["mode"]:
                 # set None to unused image args to save space
                 args[keys[0]] = None
-            elif len(keys) == 1:
+            elif len(keys) == 1 or not isinstance(args[keys[0]], dict) or "cls" in args[keys[0]]:
                 image = args.get(keys[0], None)
                 args[keys[0]] = serialize_image(image)
             else:
@@ -156,7 +158,9 @@ def deserialize_img2img_image_args(args: Dict):
             continue
 
         for keys in image_args:
-            if len(keys) == 1:
+            if keys[0] not in args:
+                continue
+            if len(keys) == 1 or not isinstance(args[keys[0]], dict) or "cls" in args[keys[0]]:
                 image = args.get(keys[0], None)
                 args[keys[0]] = deserialize_image(image)
             else:
@@ -189,7 +193,7 @@ def deserialize_controlnet_args(args: Dict):
 def serialize_script_args(script_args: List):
     # convert UiControlNetUnit to dict to make it serializable
     for i, a in enumerate(script_args):
-        if type(a).__name__ == "UiControlNetUnit":
+        if type(a).__name__ in ("UiControlNetUnit", "ControlNetUnit"):
             script_args[i] = serialize_controlnet_args(a)
 
     return zlib.compress(pickle.dumps(script_args))
@@ -238,12 +242,20 @@ def map_controlnet_args_to_api_task_args(args: Dict):
     return args
 
 
+def get_ui_task_function(is_img2img: bool):
+    module = img2img if is_img2img else txt2img
+    prefix = "img2img" if is_img2img else "txt2img"
+    # Neo's public txt2img wrapper is (id_task, request, *args). Inspect the
+    # processing factory instead, otherwise every setting becomes a script arg.
+    for name in (prefix + "_create_processing", prefix + "_function", prefix):
+        fn = getattr(module, name, None)
+        if fn is not None and len(inspect.getfullargspec(fn).args) > 2:
+            return fn
+    return getattr(module, prefix)
+
+
 def map_ui_task_args_list_to_named_args(args: List, is_img2img: bool):
-    fn = (
-        getattr(img2img, "img2img_create_processing", img2img.img2img)
-        if is_img2img
-        else getattr(txt2img, "txt2img_create_processing", txt2img.txt2img)
-    )
+    fn = get_ui_task_function(is_img2img)
     arg_names = inspect.getfullargspec(fn).args
 
     # SD WebUI 1.5.0 has new request arg
@@ -280,11 +292,7 @@ def map_ui_task_args_list_to_named_args(args: List, is_img2img: bool):
 
 
 def map_named_args_to_ui_task_args_list(named_args: Dict, script_args: List, is_img2img: bool):
-    fn = (
-        getattr(img2img, "img2img_create_processing", img2img.img2img)
-        if is_img2img
-        else getattr(txt2img, "txt2img_create_processing", txt2img.txt2img)
-    )
+    fn = get_ui_task_function(is_img2img)
     arg_names = inspect.getfullargspec(fn).args
 
     sampler_name = named_args.get("sampler_name", None)
